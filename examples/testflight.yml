@@ -1,0 +1,32 @@
+# Put in the app repository as .github/workflows/testflight.yml. Uploads a build to TestFlight
+# when started by hand; add a workflow_run trigger (as in ios-ota-server's examples) to upload
+# after every green CI run on main.
+name: TestFlight
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: testflight
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: your-org/ios-testflight@<full commit sha>
+        with:
+          scheme: MyApp
+          team-id: ${{ vars.APPLE_TEAM_ID }}
+          api-key-id: ${{ vars.ASC_KEY_ID }}
+          api-issuer-id: ${{ vars.ASC_ISSUER_ID }}
+          api-private-key: ${{ secrets.ASC_PRIVATE_KEY }}
+          # Optional: unlock the runner user's keychain first (see README).
+          # keychain-password-file: /Users/<runner user>/.config/ios-testflight/keychain.password

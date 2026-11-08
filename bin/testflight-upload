@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# Archives an iOS app and uploads it to App Store Connect for TestFlight, signing through an
+# App Store Connect API key: no Apple ID signed in to Xcode, no distribution certificate kept on
+# the Mac. macOS with Xcode.
+#
+# Usage: testflight-upload --scheme <scheme> [--project-dir <dir>] [--project <x.xcodeproj> |
+#          --workspace <x.xcworkspace>] [--configuration <name>] [--team-id <id>]
+#          [--build-number <n>] --key-id <id> --issuer-id <id> [--key-path <AuthKey.p8>]
+#          [--keychain-password-file <file>] [--output <dir>]
+# The private key comes from --key-path or, preferably, the ASC_PRIVATE_KEY environment variable
+# (the .p8 file's contents, e.g. from a GitHub secret). It is written to a private temporary file
+# and removed on exit; it is never printed.
+set -euo pipefail
+
+die() { echo "testflight: $*" >&2; exit 1; }
+log() { echo "testflight: $*" >&2; }
+
+project_dir="$PWD" scheme="" project="" workspace="" configuration="Release" team_id=""
+build_number="" key_id="${ASC_KEY_ID:-}" issuer_id="${ASC_ISSUER_ID:-}" key_path="${ASC_KEY_PATH:-}"
+keychain_password_file="${KEYCHAIN_PASSWORD_FILE:-}" output=""
+while (($#)); do
+    case "$1" in
+        --project-dir) project_dir="$2"; shift 2 ;;
+        --scheme) scheme="$2"; shift 2 ;;
+        --project) project="$2"; shift 2 ;;
+        --workspace) workspace="$2"; shift 2 ;;
+        --configuration) configuration="$2"; shift 2 ;;
+        --team-id) team_id="$2"; shift 2 ;;
+        --build-number) build_number="$2"; shift 2 ;;
+        --key-id) key_id="$2"; shift 2 ;;
+        --issuer-id) issuer_id="$2"; shift 2 ;;
+        --key-path) key_path="$2"; shift 2 ;;
+        --keychain-password-file) keychain_password_file="$2"; shift 2 ;;
+        --output) output="$2"; shift 2 ;;
+        -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+        *) die "unknown argument $1" ;;
+    esac
+done
+
+[[ -n "$scheme" ]] || die "--scheme is required"
+[[ -n "$key_id" && -n "$issuer_id" ]] || die "an App Store Connect API key is required: --key-id and --issuer-id (or ASC_KEY_ID and ASC_ISSUER_ID)"
+[[ "$key_id" =~ ^[A-Z0-9]{10}$ ]] || die "--key-id should be the 10-character Key ID from App Store Connect"
+[[ "$issuer_id" =~ ^[0-9a-fA-F-]{36}$ ]] || die "--issuer-id should be the Issuer ID (a UUID) from App Store Connect"
+[[ -z "$team_id" || "$team_id" =~ ^[A-Z0-9]{10}$ ]] || die "--team-id should be a 10-character team ID"
+# A build number must grow with every upload. The default, the UTC time to the minute, always does.
+: "${build_number:=$(date -u +%Y%m%d%H%M)}"
+[[ "$build_number" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]] || die "--build-number must be up to three dot-separated numbers"
+[[ -z "$project" || -z "$workspace" ]] || die "pass --project or --workspace, not both"
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+output="${output:-${RUNNER_TEMP:-$work}/testflight-$scheme}"
+rm -rf "$output"
+mkdir -p "$output"
+
+# The API key: from the environment (a secret) into a private file, or an existing file.
+if [[ -n "${ASC_PRIVATE_KEY:-}" ]]; then
+    key_path="$work/AuthKey_$key_id.p8"
+    (umask 077 && printf '%s\n' "$ASC_PRIVATE_KEY" > "$key_path")
+elif [[ -z "$key_path" ]]; then
+    die "no private key: set ASC_PRIVATE_KEY (the .p8 contents) or pass --key-path"
+fi
+[[ -f "$key_path" && -r "$key_path" ]] || die "private key file $key_path is not readable"
+grep -q -- "-----BEGIN PRIVATE"" KEY-----" "$key_path" || die "private key file $key_path is not a .p8 key"
+auth=(-allowProvisioningUpdates -authenticationKeyPath "$key_path"
+    -authenticationKeyID "$key_id" -authenticationKeyIssuerID "$issuer_id")
+
+if [[ -n "$keychain_password_file" ]]; then
+    # A runner service can find the login keychain locked; signing then fails with errSecInternalComponent.
+    [[ -f "$keychain_password_file" && -r "$keychain_password_file" ]] || die "keychain password file $keychain_password_file is not readable"
+    mode="$(stat -f %Lp "$keychain_password_file" 2>/dev/null || stat -c %a "$keychain_password_file")"
+    [[ "$mode" =~ 00$ ]] || die "$keychain_password_file is readable by others; run: chmod 600 \"$keychain_password_file\""
+    security unlock-keychain -p "$(< "$keychain_password_file")" "$HOME/Library/Keychains/login.keychain-db" > /dev/null 2>&1 \
+        || die "could not unlock the login keychain with $keychain_password_file"
+    log "unlocked the login keychain"
+fi
+
+cd "$project_dir"
+if [[ -f project.yml ]] && command -v xcodegen > /dev/null; then
+    xcodegen generate --quiet >&2
+fi
+container=()
+if [[ -n "$workspace" ]]; then container=(-workspace "$workspace")
+elif [[ -n "$project" ]]; then container=(-project "$project")
+fi
+settings=("CURRENT_PROJECT_VERSION=$build_number")
+[[ -n "$team_id" ]] && settings+=("DEVELOPMENT_TEAM=$team_id")
+
+archive="$output/App.xcarchive"
+log "archiving $scheme ($configuration), build $build_number${team_id:+, team $team_id}"
+xcodebuild archive "${container[@]}" -scheme "$scheme" -configuration "$configuration" \
+    -destination 'generic/platform=iOS' -archivePath "$archive" "${auth[@]}" "${settings[@]}" -quiet >&2
+
+# The build number only reaches the app if Info.plist reads $(CURRENT_PROJECT_VERSION). Check it
+# here, because App Store Connect would refuse a repeated build number only after the upload.
+info="$(find "$archive/Products/Applications" -maxdepth 2 -name Info.plist -path '*.app/*' | head -n 1)"
+[[ -n "$info" ]] || die "no app in the archive"
+read -r version built <<< "$(python3 -c 'import plistlib,sys; p=plistlib.load(open(sys.argv[1],"rb")); print(p.get("CFBundleShortVersionString","?"), p.get("CFBundleVersion","?"))' "$info")"
+[[ "$built" == "$build_number" ]] || die "the archived app has build number '$built', not $build_number: set CFBundleVersion to \$(CURRENT_PROJECT_VERSION) in its Info.plist"
+
+options="$output/ExportOptions.plist"
+python3 - "$options" "$team_id" <<'PY'
+import plistlib, sys
+path, team = sys.argv[1], sys.argv[2]
+options = {
+    "method": "app-store-connect",
+    "destination": "upload",
+    "signingStyle": "automatic",
+    "uploadSymbols": True,
+    # The build number was set above; don't let Xcode change it.
+    "manageAppVersionAndBuildNumber": False,
+}
+if team:
+    options["teamID"] = team
+with open(path, "wb") as handle:
+    plistlib.dump(options, handle)
+PY
+
+log "uploading $scheme $version ($build_number) to App Store Connect"
+xcodebuild -exportArchive -archivePath "$archive" -exportOptionsPlist "$options" \
+    -exportPath "$output/export" "${auth[@]}" -quiet >&2
+log "uploaded; it appears in TestFlight once App Store Connect has processed it"
+
+if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+    {
+        echo "### TestFlight upload"
+        echo "- \`$scheme\` $version ($build_number)${team_id:+, team \`$team_id\`}"
+        echo "- Shows in TestFlight once App Store Connect finishes processing (usually minutes)."
+    } >> "$GITHUB_STEP_SUMMARY"
+fi
+echo "$version ($build_number)"
