@@ -8,8 +8,14 @@
 #          [--build-number <n>] --key-id <id> --issuer-id <id> [--key-path <AuthKey.p8>]
 #          [--keychain-password-file <file>] [--output <dir>]
 # The private key comes from --key-path or, preferably, the ASC_PRIVATE_KEY environment variable
-# (the .p8 file's contents, e.g. from a GitHub secret). It is written to a private temporary file
-# and removed on exit; it is never printed.
+# (the .p8 file's contents, e.g. from a GitHub secret). The variable is removed from the
+# environment at once, so xcodegen, xcodebuild and build scripts don't inherit it; the key is
+# written to a private temporary file just before archiving and removed on exit. It is never
+# printed. xcodebuild must read that file, so code that runs during the build (Run Script phases,
+# package plugins, xcodegen commands) runs as the same user and could read it too: build only
+# code you trust.
+# Without --output, the archive goes to a new folder under $RUNNER_TEMP. With --output, only the
+# files this script writes there (App.xcarchive, ExportOptions.plist, export/) are replaced.
 set -euo pipefail
 
 die() { echo "testflight: $*" >&2; exit 1; }
@@ -32,12 +38,15 @@ while (($#)); do
         --key-path) key_path="$2"; shift 2 ;;
         --keychain-password-file) keychain_password_file="$2"; shift 2 ;;
         --output) output="$2"; shift 2 ;;
-        -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
         *) die "unknown argument $1" ;;
     esac
 done
 
 [[ -n "$scheme" ]] || die "--scheme is required"
+# A scheme is a file name in the project: no slashes, control characters or leading dash.
+[[ "$scheme" != -* && "$scheme" != *"/"* && "$scheme" != *[[:cntrl:]]* ]] \
+    || die "--scheme should be a scheme name, without '/', control characters or a leading '-'"
 [[ -n "$key_id" && -n "$issuer_id" ]] || die "an App Store Connect API key is required: --key-id and --issuer-id (or ASC_KEY_ID and ASC_ISSUER_ID)"
 [[ "$key_id" =~ ^[A-Z0-9]{10}$ ]] || die "--key-id should be the 10-character Key ID from App Store Connect"
 [[ "$issuer_id" =~ ^[0-9a-fA-F-]{36}$ ]] || die "--issuer-id should be the Issuer ID (a UUID) from App Store Connect"
@@ -47,23 +56,32 @@ done
 [[ "$build_number" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]] || die "--build-number must be up to three dot-separated numbers"
 [[ -z "$project" || -z "$workspace" ]] || die "pass --project or --workspace, not both"
 
-work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
-output="${output:-${RUNNER_TEMP:-$work}/testflight-$scheme}"
-rm -rf "$output"
-mkdir -p "$output"
-
-# The API key: from the environment (a secret) into a private file, or an existing file.
-if [[ -n "${ASC_PRIVATE_KEY:-}" ]]; then
-    key_path="$work/AuthKey_$key_id.p8"
-    (umask 077 && printf '%s\n' "$ASC_PRIVATE_KEY" > "$key_path")
-elif [[ -z "$key_path" ]]; then
+# The API key: take it out of the environment before anything else runs. A shell variable that
+# is not exported stays in this script.
+private_key="${ASC_PRIVATE_KEY:-}"
+unset ASC_PRIVATE_KEY
+key_marker="-----BEGIN PRIVATE"" KEY-----"
+if [[ -n "$private_key" ]]; then
+    [[ "$private_key" == *"$key_marker"* ]] || die "ASC_PRIVATE_KEY is not a .p8 key"
+elif [[ -n "$key_path" ]]; then
+    [[ -f "$key_path" && -r "$key_path" ]] || die "private key file $key_path is not readable"
+    grep -q -- "$key_marker" "$key_path" || die "private key file $key_path is not a .p8 key"
+    key_path="$(cd "$(dirname "$key_path")" && pwd)/$(basename "$key_path")"
+else
     die "no private key: set ASC_PRIVATE_KEY (the .p8 contents) or pass --key-path"
 fi
-[[ -f "$key_path" && -r "$key_path" ]] || die "private key file $key_path is not readable"
-grep -q -- "-----BEGIN PRIVATE"" KEY-----" "$key_path" || die "private key file $key_path is not a .p8 key"
-auth=(-allowProvisioningUpdates -authenticationKeyPath "$key_path"
-    -authenticationKeyID "$key_id" -authenticationKeyIssuerID "$issuer_id")
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+# Inputs never become part of a path that is deleted: the default folder is new, and with
+# --output only this script's own files are removed.
+if [[ -n "$output" ]]; then
+    mkdir -p "$output"
+    rm -rf "$output/App.xcarchive" "$output/export" "$output/ExportOptions.plist"
+else
+    output="$(mktemp -d "${RUNNER_TEMP:-$work}/testflight.XXXXXX")"
+fi
+output="$(cd "$output" && pwd)"
 
 if [[ -n "$keychain_password_file" ]]; then
     # A runner service can find the login keychain locked; signing then fails with errSecInternalComponent.
@@ -83,6 +101,15 @@ container=()
 if [[ -n "$workspace" ]]; then container=(-workspace "$workspace")
 elif [[ -n "$project" ]]; then container=(-project "$project")
 fi
+
+# The key file exists only from here on, after xcodegen, for the two xcodebuild steps.
+if [[ -n "$private_key" ]]; then
+    key_path="$work/AuthKey_$key_id.p8"
+    (umask 077 && printf '%s\n' "$private_key" > "$key_path")
+    private_key=""
+fi
+auth=(-allowProvisioningUpdates -authenticationKeyPath "$key_path"
+    -authenticationKeyID "$key_id" -authenticationKeyIssuerID "$issuer_id")
 settings=("CURRENT_PROJECT_VERSION=$build_number")
 [[ -n "$team_id" ]] && settings+=("DEVELOPMENT_TEAM=$team_id")
 

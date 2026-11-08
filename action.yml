@@ -29,7 +29,7 @@ inputs:
     description: App Store Connect API issuer ID.
     required: true
   api-private-key:
-    description: Contents of the API key's .p8 file. Pass it from a secret.
+    description: Contents of the API key's .p8 file. Pass it from a secret. It is kept out of the environment of xcodebuild and build scripts, but they can read the temporary key file, so build only trusted code.
     default: ""
   api-key-path:
     description: Path to the .p8 file on the runner, when it is kept there instead of in a secret.
