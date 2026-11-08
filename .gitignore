@@ -1,0 +1,5 @@
+*.p8
+*.password
+*.ipa
+*.xcarchive
+.DS_Store

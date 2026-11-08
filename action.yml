@@ -1,0 +1,70 @@
+name: iOS TestFlight upload
+description: Archive an iOS app and upload it to TestFlight, signed through an App Store Connect API key.
+inputs:
+  project-dir:
+    description: Directory that holds the Xcode project.
+    default: "."
+  scheme:
+    description: Scheme to archive.
+    required: true
+  project:
+    description: The .xcodeproj, if the directory holds more than one. Leave empty to let xcodebuild find it.
+    default: ""
+  workspace:
+    description: The .xcworkspace to build instead of a project.
+    default: ""
+  configuration:
+    description: Build configuration to archive.
+    default: Release
+  team-id:
+    description: Team that signs. Empty uses the project's DEVELOPMENT_TEAM.
+    default: ""
+  build-number:
+    description: CFBundleVersion for this upload. Empty uses the UTC time to the minute (yyyymmddHHMM), which always grows.
+    default: ""
+  api-key-id:
+    description: App Store Connect API key ID.
+    required: true
+  api-issuer-id:
+    description: App Store Connect API issuer ID.
+    required: true
+  api-private-key:
+    description: Contents of the API key's .p8 file. Pass it from a secret.
+    default: ""
+  api-key-path:
+    description: Path to the .p8 file on the runner, when it is kept there instead of in a secret.
+    default: ""
+  keychain-password-file:
+    description: File on the runner with the runner user's login password (chmod 600), to unlock the keychain before signing.
+    default: ""
+outputs:
+  version:
+    description: The uploaded version and build, e.g. "1.2 (202611081530)".
+    value: ${{ steps.upload.outputs.version }}
+runs:
+  using: composite
+  steps:
+    - name: Archive and upload
+      id: upload
+      shell: bash
+      env:
+        INPUT_PROJECT_DIR: ${{ inputs.project-dir }}
+        INPUT_SCHEME: ${{ inputs.scheme }}
+        INPUT_PROJECT: ${{ inputs.project }}
+        INPUT_WORKSPACE: ${{ inputs.workspace }}
+        INPUT_CONFIGURATION: ${{ inputs.configuration }}
+        INPUT_TEAM_ID: ${{ inputs.team-id }}
+        INPUT_BUILD_NUMBER: ${{ inputs.build-number }}
+        ASC_KEY_ID: ${{ inputs.api-key-id }}
+        ASC_ISSUER_ID: ${{ inputs.api-issuer-id }}
+        ASC_PRIVATE_KEY: ${{ inputs.api-private-key }}
+        ASC_KEY_PATH: ${{ inputs.api-key-path }}
+        KEYCHAIN_PASSWORD_FILE: ${{ inputs.keychain-password-file }}
+      run: |
+        args=(--project-dir "$INPUT_PROJECT_DIR" --scheme "$INPUT_SCHEME" --configuration "$INPUT_CONFIGURATION")
+        [[ -n "$INPUT_PROJECT" ]] && args+=(--project "$INPUT_PROJECT")
+        [[ -n "$INPUT_WORKSPACE" ]] && args+=(--workspace "$INPUT_WORKSPACE")
+        [[ -n "$INPUT_TEAM_ID" ]] && args+=(--team-id "$INPUT_TEAM_ID")
+        [[ -n "$INPUT_BUILD_NUMBER" ]] && args+=(--build-number "$INPUT_BUILD_NUMBER")
+        version="$("$GITHUB_ACTION_PATH/bin/testflight-upload" "${args[@]}" | tail -n 1)"
+        echo "version=$version" >> "$GITHUB_OUTPUT"
