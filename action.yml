@@ -66,5 +66,16 @@ runs:
         [[ -n "$INPUT_WORKSPACE" ]] && args+=(--workspace "$INPUT_WORKSPACE")
         [[ -n "$INPUT_TEAM_ID" ]] && args+=(--team-id "$INPUT_TEAM_ID")
         [[ -n "$INPUT_BUILD_NUMBER" ]] && args+=(--build-number "$INPUT_BUILD_NUMBER")
-        version="$("$GITHUB_ACTION_PATH/bin/testflight-upload" "${args[@]}" | tail -n 1)"
+        # Run the script as its own command, so its exit status fails this step on every bash. Inside
+        # "$(... | tail)" the old /bin/bash on macOS let a failed upload pass as success.
+        out="$(mktemp)"
+        status=0
+        "$GITHUB_ACTION_PATH/bin/testflight-upload" "${args[@]}" > "$out" || status=$?
+        if (( status != 0 )); then
+          echo "::error::testflight-upload failed with exit status $status; see the lines above"
+          exit "$status"
+        fi
+        version="$(tail -n 1 "$out")"
+        rm -f "$out"
+        [[ -n "$version" ]] || { echo "::error::testflight-upload printed no version"; exit 1; }
         echo "version=$version" >> "$GITHUB_OUTPUT"
