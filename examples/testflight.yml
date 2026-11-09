@@ -1,6 +1,7 @@
 # Put in the app repository as .github/workflows/testflight.yml. Uploads a build to TestFlight
-# when started by hand; add a workflow_run trigger (as in ios-ota-server's examples) to upload
-# after every green CI run on main.
+# when started by hand. To upload after every green CI run on main, add a workflow_run trigger and
+# limit the job to pushes to main (see "Security" in the README): never run this job, or any job on
+# this runner, for pull requests.
 name: TestFlight
 
 on:
@@ -16,12 +17,15 @@ concurrency:
 jobs:
   upload:
     runs-on: [self-hosted, macOS, ARM64]
+    # The environment holds ASC_PRIVATE_KEY and lets only main deploy (README, setup step 4).
+    environment: testflight
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - uses: your-org/ios-testflight@<full commit sha>
+      # Pin the full 40-character commit SHA, never a tag or branch.
+      - uses: ios-ci-apps/ios-testflight@<full commit SHA>
         with:
           scheme: MyApp
           team-id: ${{ vars.APPLE_TEAM_ID }}
