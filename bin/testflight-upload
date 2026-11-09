@@ -149,8 +149,18 @@ log "uploading $scheme $version ($build_number) to App Store Connect"
 # distribution logs it writes under TMPDIR, so print the relevant lines when the export fails.
 touch "$work/export-started"
 status=0
-xcodebuild -exportArchive -archivePath "$archive" -exportOptionsPlist "$options" \
-    -exportPath "$output/export" "${auth[@]}" -quiet >&2 || status=$?
+# Xcode packages the IPA with rsync and expects Apple's own. A Homebrew rsync earlier on PATH
+# (3.x) rejects its arguments and the export fails with "Copy failed". Only rsync is swapped:
+# a folder holding a link to the system rsync goes first on PATH, and everything else, xcodebuild
+# included, resolves as before.
+export_path="$PATH"
+if [[ -x /usr/bin/rsync ]]; then
+    mkdir -p "$work/system-rsync"
+    ln -sf /usr/bin/rsync "$work/system-rsync/rsync"
+    export_path="$work/system-rsync:$PATH"
+fi
+PATH="$export_path" xcodebuild -exportArchive -archivePath "$archive" \
+    -exportOptionsPlist "$options" -exportPath "$output/export" "${auth[@]}" -quiet >&2 || status=$?
 if ((status != 0)); then
     logs="$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name '*.xcdistributionlogs' -newer "$work/export-started" 2> /dev/null | tail -n 1)"
     if [[ -n "$logs" ]]; then
