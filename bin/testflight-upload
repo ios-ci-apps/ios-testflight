@@ -145,8 +145,25 @@ with open(path, "wb") as handle:
 PY
 
 log "uploading $scheme $version ($build_number) to App Store Connect"
+# Xcode's own error for a failed export is often just "Copy failed". The reason is in the
+# distribution logs it writes under TMPDIR, so print the relevant lines when the export fails.
+touch "$work/export-started"
+status=0
 xcodebuild -exportArchive -archivePath "$archive" -exportOptionsPlist "$options" \
-    -exportPath "$output/export" "${auth[@]}" -quiet >&2
+    -exportPath "$output/export" "${auth[@]}" -quiet >&2 || status=$?
+if ((status != 0)); then
+    logs="$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name '*.xcdistributionlogs' -newer "$work/export-started" 2> /dev/null | tail -n 1)"
+    if [[ -n "$logs" ]]; then
+        log "export failed; Xcode's distribution log ($logs) says:"
+        # Errors from every log first, then the end of the main log, which names the failing step.
+        grep -h -i -E 'error|fail|denied|not (found|available|allowed)|agreement' "$logs"/*.log 2> /dev/null | tail -n 40 >&2 || true
+        echo "--- end of IDEDistribution.standard.log ---" >&2
+        tail -n 40 "$logs/IDEDistribution.standard.log" >&2 2> /dev/null || true
+    else
+        log "export failed, and Xcode left no distribution log in ${TMPDIR:-/tmp}"
+    fi
+    exit "$status"
+fi
 log "uploaded; it appears in TestFlight once App Store Connect has processed it"
 
 if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
