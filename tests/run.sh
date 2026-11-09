@@ -18,8 +18,11 @@ cat > "$fakebin/xcodebuild" <<'FAKE'
 # Records each call; "archive" writes an app whose CFBundleVersion follows CURRENT_PROJECT_VERSION
 # unless FAKE_FIXED_BUILD is set, the way an Info.plist with a hard-coded build number behaves.
 printf '%s\n' "$*" >> "$XCODEBUILD_LOG"
-# The export must see the system tools first, so Xcode's rsync is Apple's, not Homebrew's.
-[[ "$1" != -exportArchive ]] || echo "${PATH%%:*}" > "$XCODEBUILD_LOG.exportpath"
+# During the export, rsync must resolve to the system one, not a Homebrew rsync earlier on PATH.
+if [[ "$1" == -exportArchive ]]; then
+    r="$(command -v rsync || true)"
+    { [[ -L "$r" ]] && readlink "$r"; } > "$XCODEBUILD_LOG.exportrsync" || echo "$r" > "$XCODEBUILD_LOG.exportrsync"
+fi
 # Build scripts inherit this environment; record whether the key is in it.
 [[ -z "${ASC_PRIVATE_KEY+set}" ]] || echo "xcodebuild saw ASC_PRIVATE_KEY" >> "$LEAK_LOG"
 if [[ "$1" == archive ]]; then
@@ -100,7 +103,9 @@ touch "$work/project/project.yml"; : > "$LEAK_LOG"
 check "xcodegen and xcodebuild don't inherit ASC_PRIVATE_KEY" 'ASC_PRIVATE_KEY="$KEY" upload --build-number 11 > /dev/null 2>&1 && [[ -s "$LEAK_LOG.ran" && ! -s "$LEAK_LOG" ]]'
 rm "$work/project/project.yml"
 check "a failed export prints the reason from Xcode's distribution log and keeps its exit status" '(ASC_PRIVATE_KEY="$KEY" FAKE_EXPORT_FAIL=1 upload --build-number 13 > "$work/fail.txt" 2>&1; [[ $? -eq 70 ]]) && grep -q "You must accept the latest agreement" "$work/fail.txt" && grep -q "distribution log" "$work/fail.txt"'
-check "the export runs with the system directories first on PATH" '[[ "$(cat "$XCODEBUILD_LOG.exportpath")" == /usr/bin ]]'
+# A fake Homebrew rsync first on PATH, as on the CycleCompanion runner.
+mkdir -p "$work/brew"; printf '#!/bin/sh\nexit 1\n' > "$work/brew/rsync"; chmod +x "$work/brew/rsync"
+check "the export uses the system rsync even when another rsync comes first on PATH" '(PATH="$work/brew:$PATH" ASC_PRIVATE_KEY="$KEY" upload --build-number 14 > /dev/null 2>&1) && if [[ -x /usr/bin/rsync ]]; then [[ "$(cat "$XCODEBUILD_LOG.exportrsync")" == /usr/bin/rsync ]]; else true; fi'
 check "a relative key path works from another project directory" '(cd "$work" && "$ROOT/bin/testflight-upload" --project-dir project --scheme DemoProd --key-id ABCDE12345 --issuer-id "$ISSUER" --output out --key-path AuthKey.p8 --build-number 12 > /dev/null 2>&1) && grep "^archive" "$XCODEBUILD_LOG" | tail -n 1 | grep -q -- "-authenticationKeyPath $work/AuthKey.p8"'
 
 if ((fails)); then echo "$fails test(s) failed"; exit 1; fi
