@@ -115,7 +115,8 @@ settings=("CURRENT_PROJECT_VERSION=$build_number")
 
 archive="$output/App.xcarchive"
 log "archiving $scheme ($configuration), build $build_number${team_id:+, team $team_id}"
-xcodebuild archive "${container[@]}" -scheme "$scheme" -configuration "$configuration" \
+# ${arr[@]+...} because macOS /bin/bash 3.2 treats an empty array as unbound under set -u.
+xcodebuild archive ${container[@]+"${container[@]}"} -scheme "$scheme" -configuration "$configuration" \
     -destination 'generic/platform=iOS' -archivePath "$archive" "${auth[@]}" "${settings[@]}" -quiet >&2
 
 # The build number only reaches the app if Info.plist reads $(CURRENT_PROJECT_VERSION). Check it
