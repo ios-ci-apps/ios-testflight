@@ -33,6 +33,15 @@ if [[ "$1" == archive ]]; then
     python3 -c 'import plistlib,sys; plistlib.dump({"CFBundleShortVersionString":"1.2","CFBundleVersion":sys.argv[2]}, open(sys.argv[1],"wb"))' \
         "$archive/Products/Applications/Demo.app/Info.plist" "${FAKE_FIXED_BUILD:-$build}"
 fi
+# FAKE_EXPORT_FAIL makes the export fail the way Xcode does: a terse error, with the reason only in
+# a distribution log under TMPDIR.
+if [[ "$1" == -exportArchive && -n "${FAKE_EXPORT_FAIL:-}" ]]; then
+    logs="$TMPDIR/Demo_2026-11-09.xcdistributionlogs"
+    mkdir -p "$logs"
+    printf '%s\n' "step: sign" "error: You must accept the latest agreement in App Store Connect" "step: done" > "$logs/IDEDistribution.standard.log"
+    echo "error: exportArchive Copy failed" >&2
+    exit 70
+fi
 FAKE
 chmod +x "$fakebin/xcodebuild"
 # xcodegen can run commands from project.yml; record whether it can see the key.
@@ -88,6 +97,7 @@ check "--output keeps files the script did not write" 'ASC_PRIVATE_KEY="$KEY" up
 touch "$work/project/project.yml"; : > "$LEAK_LOG"
 check "xcodegen and xcodebuild don't inherit ASC_PRIVATE_KEY" 'ASC_PRIVATE_KEY="$KEY" upload --build-number 11 > /dev/null 2>&1 && [[ -s "$LEAK_LOG.ran" && ! -s "$LEAK_LOG" ]]'
 rm "$work/project/project.yml"
+check "a failed export prints the reason from Xcode's distribution log and keeps its exit status" '(ASC_PRIVATE_KEY="$KEY" FAKE_EXPORT_FAIL=1 upload --build-number 13 > "$work/fail.txt" 2>&1; [[ $? -eq 70 ]]) && grep -q "You must accept the latest agreement" "$work/fail.txt" && grep -q "distribution log" "$work/fail.txt"'
 check "a relative key path works from another project directory" '(cd "$work" && "$ROOT/bin/testflight-upload" --project-dir project --scheme DemoProd --key-id ABCDE12345 --issuer-id "$ISSUER" --output out --key-path AuthKey.p8 --build-number 12 > /dev/null 2>&1) && grep "^archive" "$XCODEBUILD_LOG" | tail -n 1 | grep -q -- "-authenticationKeyPath $work/AuthKey.p8"'
 
 if ((fails)); then echo "$fails test(s) failed"; exit 1; fi
